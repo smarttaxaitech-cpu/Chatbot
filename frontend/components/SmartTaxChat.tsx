@@ -1,7 +1,8 @@
-"use client"; 
-
+"use client";
 
 import React, { useMemo, useState, useRef, useEffect } from "react";
+import TaxSummaryDashboard from "./TaxSummaryDashboard";
+import ExpensePieChart from "./ExpensePieChart";
 
 function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
@@ -15,6 +16,17 @@ type UIMessage = {
   backendMessageId?: string; // assistant_message_id
 };
 
+const BACKEND = "http://127.0.0.1:8000";
+
+function makeId() {
+  // crypto.randomUUID() exists in modern browsers, but keep a fallback
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const c: any = globalThis.crypto;
+  return typeof c?.randomUUID === "function"
+    ? c.randomUUID()
+    : `${Date.now()}-${Math.random()}`;
+}
+
 export default function SmartTaxChat({
   firstName,
   onReset,
@@ -22,7 +34,10 @@ export default function SmartTaxChat({
   firstName: string;
   onReset: () => void;
 }) {
-  const quickPills = useMemo(() => ["Freelancers", "Creators", "Self-employed"], []);
+  const quickPills = useMemo(
+    () => ["Freelancers", "Creators", "Self-employed"],
+    [],
+  );
   const TYPING_TEXT = "...";
 
   const [input, setInput] = useState("");
@@ -32,6 +47,7 @@ export default function SmartTaxChat({
   const [commentBoxFor, setCommentBoxFor] = useState<string | null>(null);
   const [commentText, setCommentText] = useState("");
   const [lastIncome, setLastIncome] = useState<number | null>(null);
+  const [lastExpenses, setLastExpenses] = useState<number>(0);
 
   // Track feedback state per backend message id (disable after voting)
   const [feedbackByMsg, setFeedbackByMsg] = useState<
@@ -39,30 +55,34 @@ export default function SmartTaxChat({
   >({});
 
   const [messages, setMessages] = useState<UIMessage[]>([
-    
     {
       id: "welcome",
       role: "bot",
       text: `Hi ${firstName}! 👋 Ask me anything about deductions, filing, or expenses.`,
     },
   ]);
-  const messagesContainerRef = useRef<HTMLDivElement | null>(null);  
+
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+
   useEffect(() => {
-  if (messagesContainerRef.current) {
-    messagesContainerRef.current.scrollTop =
-      messagesContainerRef.current.scrollHeight;
-  }
-}, [messages]);
+    if (messagesContainerRef.current) {
+      messagesContainerRef.current.scrollTop =
+        messagesContainerRef.current.scrollHeight;
+    }
+  }, [messages]);
 
   const [file, setFile] = useState<File | null>(null);
   const [uploadResult, setUploadResult] = useState<any>(null);
   const [calcResult, setCalcResult] = useState<any>(null);
 
-  const [activeTab, setActiveTab] = useState<"chat" | "expenses" | "summary">("chat");
+  const [activeTab, setActiveTab] = useState<"chat" | "expenses" | "summary">(
+    "chat",
+  );
 
   const [income, setIncome] = useState("");
   const [expenses, setExpenses] = useState<any[]>([]);
   const totalExpenses = uploadResult?.total_uploaded ?? 0;
+
   const cleanName = firstName?.trim() || "";
 
   // -------------------------
@@ -71,91 +91,133 @@ export default function SmartTaxChat({
   async function ensureConversationId(): Promise<string> {
     if (conversationId) return conversationId;
 
-    const resp = await fetch("http://127.0.0.1:8000/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message: "start",
-        history: [],
-      }),
-    });
-
-    const raw = await resp.text();
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${raw}`);
-
-    const data = JSON.parse(raw);
-    const convId = data.conversation_id as string;
-    setConversationId(convId);
-    return convId;
+    const newId = crypto.randomUUID();
+    setConversationId(newId);
+    return newId;
   }
 
   function parseIncome(raw: string): number {
-    // allow "60,000" too
     const cleaned = (raw || "").replace(/,/g, "").trim();
     const n = Number(cleaned);
     if (!Number.isFinite(n) || n < 0) return NaN;
     return n;
   }
 
-function looksNumericHeavy(text: string, hasLastIncome: boolean) {
-  const numbers = text.match(/\d[\d,]*/g) || [];
-  const hasDollar = text.includes("$");
-  const lower = text.toLowerCase();
+  function parseAmountToken(token: string): number {
+    // Handles: 90k, 1.5m, $5,000, 5000
+    const t = token.trim().toLowerCase().replace(/\$/g, "").replace(/,/g, "");
+    const m = t.match(/^(\d+(\.\d+)?)(k|m)?$/i);
+    if (!m) return NaN;
 
-  const incomeKw = ["made", "income", "earned"].some(k => lower.includes(k));
-  const expenseKw = ["expense", "expenses", "spent", "cost", "paid"].some(k => lower.includes(k));
+    let n = Number(m[1]);
+    const suffix = m[3];
+    if (suffix === "k") n *= 1000;
+    if (suffix === "m") n *= 1000000;
 
-  // 2+ numbers → likely "income + expenses" style
-  if (numbers.length >= 2 && (hasDollar || incomeKw || expenseKw)) return true;
-
-  // 1 number + income keyword → income-only message
-  if (numbers.length >= 1 && incomeKw) return true;
-
-  // 1 number + expense keyword → only if we have last income to apply it to
-  if (numbers.length >= 1 && expenseKw && hasLastIncome) return true;
-
-  return false;
-}
-
-function extractFinanceData(text: string) {
-  const cleaned = text.replace(/,/g, "");
-
-  const numbers = cleaned.match(/\$?\d+(\.\d+)?/g) || [];
-
-  const values = numbers.map((n) =>
-    Number(n.replace("$", ""))
-  );
-
-  let income = 0;
-  let expenses = 0;
-
-  const lower = text.toLowerCase();
-
-  if (lower.includes("made") || lower.includes("earned") || lower.includes("income")) {
-    income = values[0] || 0;
+    return n;
   }
 
-  if (lower.includes("expense") || lower.includes("spent")) {
-  expenses = values.length >= 2 ? (values[1] || 0) : (values[0] || 0);
-}
+  function looksNumericHeavy(text: string, hasLastIncome: boolean) {
+    const lower = text.toLowerCase();
+    const tokens = lower.match(/\$?\d[\d,]*(?:\.\d+)?[km]?/g) || [];
 
-  return { income, expenses };
-}
+    // ---- hard exclusions: NOT tax estimate requests ----
+    if (
+      /(break[-\s]?even|subscribers?|customers?|pricing|margin)/.test(lower) ||
+      /(1099|w-9|w9|1099-nec|issue a 1099|send a 1099)/.test(lower) ||
+      /(deductible\?|is .* deductible|can i deduct)/.test(lower)
+    ) {
+      return false;
+    }
+
+    const hasIncomeSignal =
+      /(made|income|earned|revenue|1099|freelancing|profit)/.test(lower);
+    const hasTaxSignal =
+      /(rough tax|estimate|how much tax|tax estimate|total tax|self employment tax|income tax)/.test(
+        lower,
+      );
+    const hasExpenseSignal = /(spent|expenses?|cost|paid|charged)/.test(lower);
+
+    // Must have numbers
+    if (tokens.length === 0) return false;
+
+    // Tax-estimate intent: income + optionally expenses
+    if (hasIncomeSignal) return true;
+
+    // Additive expenses only if user already gave income earlier
+    if (hasLastIncome && hasExpenseSignal) return true;
+
+    // If they explicitly ask for tax estimate, allow
+    if (hasTaxSignal) return true;
+
+    return false;
+  }
+
+  function extractFinanceData(text: string) {
+    const lower = text.toLowerCase();
+
+    const rawTokens = lower.match(/\$?\d[\d,]*(?:\.\d+)?[km]?/g) || [];
+    const values = rawTokens
+      .map(parseAmountToken)
+      .filter((n) => Number.isFinite(n));
+
+    const incomeKw = /(made|income|earned)/;
+    const expenseKw = /(expense|expenses|spent|cost|paid|deduct)/;
+
+    const mentionsIncome = incomeKw.test(lower);
+    const mentionsExpense = expenseKw.test(lower);
+
+    const spentMatch = lower.match(
+      /(?:spent|expenses?|cost|paid)\s*\$?\s*(\d[\d,]*(?:\.\d+)?[km]?)/,
+    );
+    const madeMatch = lower.match(
+      /(?:made|earned|income)\s*\$?\s*(\d[\d,]*(?:\.\d+)?[km]?)/,
+    );
+
+    const incomeVal = madeMatch
+      ? parseAmountToken(madeMatch[1])
+      : mentionsIncome
+        ? (values[0] ?? 0)
+        : 0;
+
+    const expenseVal = spentMatch
+      ? parseAmountToken(spentMatch[1])
+      : mentionsExpense
+        ? // If user mentioned income AND expenses but provided only ONE number
+          // (ex: "I made 60000. No expenses.") → expenses must be 0 unless explicitly given.
+          madeMatch && !spentMatch && values.length === 1
+          ? 0
+          : values.length >= 2
+            ? (values[1] ?? 0)
+            : (values[0] ?? 0)
+        : 0;
+
+    const isAdditiveExpense =
+      /add( another)?/.test(lower) &&
+      /(expense|expenses|spent|cost|paid|deduct)/.test(lower);
+
+    return {
+      income: Number.isFinite(incomeVal) ? incomeVal : 0,
+      expenses: Number.isFinite(expenseVal) ? expenseVal : 0,
+      mentionsIncome,
+      mentionsExpense,
+      isAdditiveExpense,
+    };
+  }
+
   async function upsertIncome(convId: string, amount: number) {
-    // Store in DB so report + calc can load it
-    const resp = await fetch("http://127.0.0.1:8000/income/add", {
+    const resp = await fetch(`${BACKEND}/income/add`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         conversation_id: convId,
-        income_sources: [
-          { type: "1099", amount, description: "Freelance" }, // you can change type later
-        ],
+        income_sources: [{ type: "1099", amount, description: "Freelance" }],
       }),
     });
 
     const txt = await resp.text();
-    if (!resp.ok) throw new Error(`Income save failed (${resp.status}): ${txt}`);
+    if (!resp.ok)
+      throw new Error(`Income save failed (${resp.status}): ${txt}`);
   }
 
   // -------------------------
@@ -167,7 +229,7 @@ function extractFinanceData(text: string) {
     rating: "up" | "down";
     comment?: string;
   }) {
-    const resp = await fetch("http://127.0.0.1:8000/feedback", {
+    const resp = await fetch(`${BACKEND}/feedback`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -178,15 +240,13 @@ function extractFinanceData(text: string) {
       }),
     });
 
-    if (!resp.ok) {
-      throw new Error(await resp.text());
-    }
+    if (!resp.ok) throw new Error(await resp.text());
   }
 
   async function handleFeedback(
     m: UIMessage,
     rating: "up" | "down",
-    comment?: string
+    comment?: string,
   ) {
     const msgId = m.backendMessageId;
     const convId = m.conversationId;
@@ -194,10 +254,9 @@ function extractFinanceData(text: string) {
     if (!msgId || !convId) return;
 
     const current = feedbackByMsg[msgId];
-    if (current?.submitting) return; // already sending
-    if (current?.rating) return; // already voted
+    if (current?.submitting) return;
+    if (current?.rating) return;
 
-    // Optimistic: disable immediately
     setFeedbackByMsg((prev) => ({
       ...prev,
       [msgId]: { rating, submitting: true },
@@ -211,23 +270,52 @@ function extractFinanceData(text: string) {
         comment,
       });
 
-      // Mark as done (stays disabled)
       setFeedbackByMsg((prev) => ({
         ...prev,
         [msgId]: { rating, submitting: false },
       }));
 
-      // Close comment box after successful submit
       setCommentBoxFor(null);
       setCommentText("");
     } catch (e: any) {
-      // Re-enable on error
       setFeedbackByMsg((prev) => ({
         ...prev,
         [msgId]: { rating: null, submitting: false },
       }));
       alert(e?.message ?? "Feedback failed");
     }
+  }
+
+  // -------------------------
+  // RAG answer call (Layer 4)
+  // -------------------------
+  async function askRag(question: string, convId: string) {
+    const resp = await fetch(`${BACKEND}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        conversation_id: convId,
+        message: question,
+        history: [],
+      }),
+    });
+
+    const raw = await resp.text();
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${raw}`);
+
+    return JSON.parse(raw);
+  }
+
+  function formatCitations(cites: any[] | undefined) {
+    if (!cites || !Array.isArray(cites) || cites.length === 0) return "";
+    const lines = cites.slice(0, 2).map((c) => {
+      const pages =
+        c.page_start != null
+          ? ` (p. ${c.page_start}${c.page_end ? `–${c.page_end}` : ""})`
+          : "";
+      return `- ${c.source}${pages}`;
+    });
+    return `\n\nSources:\n${lines.join("\n")}`;
   }
 
   // -------------------------
@@ -240,10 +328,9 @@ function extractFinanceData(text: string) {
     const userText = t;
     setInput("");
 
-    const typingId = crypto.randomUUID?.() ?? String(Date.now());
-    const userMsgId = crypto.randomUUID?.() ?? String(Date.now() + 1);
+    const typingId = makeId();
+    const userMsgId = makeId();
 
-    // 1) Add user message + typing bubble
     setMessages((prev) => [
       ...prev,
       { id: userMsgId, role: "user", text: userText },
@@ -251,90 +338,98 @@ function extractFinanceData(text: string) {
     ]);
 
     try {
+      // Keep conversation id for other features (calc/upload/report). For pure RAG answer, not required,
+      // but calling it is safe and keeps your app consistent.
       const convId = await ensureConversationId();
-      console.log("ROUTE_CHECK", {
-  text: userText,
-  numericHeavy: looksNumericHeavy(userText, !!lastIncome),
-});
 
-            // 🔥 If message looks numeric-heavy, use deterministic calculator
-      if (looksNumericHeavy(userText,!!lastIncome)) {
-  const { income, expenses } = extractFinanceData(userText);
+      // If numeric-heavy -> use your deterministic calc flow (unchanged)
+      if (looksNumericHeavy(userText, lastIncome !== null)) {
+        const parsed = extractFinanceData(userText);
 
-  const incomeToUse = income > 0 ? income : (lastIncome ?? 0);
-  if (income > 0) setLastIncome(income);
+        const incomeToUse = parsed.mentionsIncome
+          ? parsed.income
+          : (lastIncome ?? 0);
 
-  const res = await fetch("http://127.0.0.1:8000/calc/estimate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      conversation_id: convId,
-      income_sources: incomeToUse
-        ? [{ type: "1099", amount: incomeToUse, description: "Detected income" }]
-        : [],
-      expenses: expenses ? [{ category: "general", amount: expenses }] : [],
-      assumptions: { assumed_marginal_rate: 0.22 },
-    }),
-  });
+        let expensesToUse = parsed.expenses;
 
-  const raw = await res.text();
-  if (!res.ok) throw new Error(raw);
+        if (parsed.mentionsExpense) {
+          if (parsed.isAdditiveExpense) {
+            expensesToUse = lastExpenses + parsed.expenses;
+            setLastExpenses(expensesToUse);
+          } else {
+            setLastExpenses(parsed.expenses);
+            expensesToUse = parsed.expenses;
+          }
+        } else {
+          expensesToUse = 0;
+        }
 
-  const data = JSON.parse(raw);
+        if (parsed.mentionsIncome) setLastIncome(parsed.income);
 
-  const formatted =
-    `Net Business Income: $${data.net_business_income}\n\n` +
-    `Self-Employment Tax: $${data.self_employment_tax}\n\n` +
-    `Income Tax Estimate: $${data.income_tax_estimate}\n\n` +
-    `Total Estimated Tax: $${data.total_estimated_tax}`;
+        const res = await fetch(`${BACKEND}/calc/estimate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            conversation_id: convId,
+            income_sources: [
+              {
+                type: "1099",
+                amount: incomeToUse,
+                description: "Detected income",
+              },
+            ],
+            expenses: expensesToUse
+              ? [{ category: "general", amount: expensesToUse }]
+              : [],
+            assumptions: { assumed_marginal_rate: 0.22 },
+          }),
+        });
 
-  setMessages((prev) =>
-    prev.map((m) =>
-      m.id === typingId
-        ? { ...m, text: formatted, conversationId: convId,backendMessageId: `calc_${typingId}`,}
-        : m
-    )
-  );
+        const raw = await res.text();
+        if (!res.ok) throw new Error(raw);
 
-  return;
-}
-      const resp = await fetch("http://127.0.0.1:8000/chat", {
-      // 🔥 Deterministic calculation path
+        const data = JSON.parse(raw);
 
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          conversation_id: convId,
-          message: userText,
-          history: [],
-        }),
-      });
+        const formatted =
+          `Net Business Income: $${data.net_business_income}\n\n` +
+          `Self-Employment Tax: $${data.self_employment_tax}\n\n` +
+          `Income Tax Estimate: $${data.income_tax}\n\n` +
+          `Total Estimated Tax: $${data.total_tax}`;
 
-      const raw = await resp.text();
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}: ${raw}`);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === typingId
+              ? {
+                  ...m,
+                  text: formatted,
+                  conversationId: convId,
+                  backendMessageId: `calc_${typingId}`, // dummy id for UI
+                }
+              : m,
+          ),
+        );
+
+        return;
       }
 
-      const data = JSON.parse(raw);
+      // ✅ Normal questions -> Layer 4 RAG
+      const rag = await askRag(userText, convId);
 
-      const answer: string = data.answer_text ?? "No answer received.";
-      const newConvId: string | undefined = data.conversation_id;
-      const backendMsgId: string | undefined = data.assistant_message_id;
+      const answerText =
+        (rag.answer_text ?? "No answer received.") +
+        formatCitations(rag.citations);
 
-      if (newConvId) setConversationId(newConvId);
-
-      // 2) Replace typing bubble with backend answer + attach IDs for feedback
       setMessages((prev) =>
         prev.map((m) =>
           m.id === typingId
             ? {
                 ...m,
-                text: answer,
-                conversationId: newConvId ?? convId,
-                backendMessageId: backendMsgId,
+                text: answerText,
+                conversationId: convId, // keep for consistency
+                // backendMessageId is not returned by /rag/answer, so feedback UI won't show for this
               }
-            : m
-        )
+            : m,
+        ),
       );
     } catch (error: any) {
       setMessages((prev) =>
@@ -344,8 +439,8 @@ function extractFinanceData(text: string) {
                 ...m,
                 text: `⚠️ Could not reach backend: ${error?.message ?? ""}`,
               }
-            : m
-        )
+            : m,
+        ),
       );
     }
   }
@@ -366,11 +461,8 @@ function extractFinanceData(text: string) {
       formData.append("file", file);
 
       const res = await fetch(
-        `http://127.0.0.1:8000/expenses/upload?conversation_id=${convId}`,
-        {
-          method: "POST",
-          body: formData,
-        }
+        `${BACKEND}/expenses/upload?conversation_id=${convId}`,
+        { method: "POST", body: formData },
       );
 
       const raw = await res.text();
@@ -400,16 +492,17 @@ function extractFinanceData(text: string) {
         return;
       }
 
-      // Save income in DB so calc/report can load it
       await upsertIncome(convId, incomeAmount);
 
-      const res = await fetch("http://127.0.0.1:8000/calc/estimate", {
+      const res = await fetch(`${BACKEND}/calc/estimate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           conversation_id: convId,
-          income_sources: [], // backend will auto-load from DB
-          expenses: [], // backend will auto-load from DB
+          income: Number(income),
+          expenses: [],
+          home_office_sqft: null,
+          vehicle_business_use_percent: null,
           assumptions: { assumed_marginal_rate: 0.22 },
         }),
       });
@@ -436,19 +529,16 @@ function extractFinanceData(text: string) {
       return;
     }
 
-    const res = await fetch(
-      `http://127.0.0.1:8000/generate-report/${conversationId}`,
-      { method: "POST" }
-    );
+    const res = await fetch(`${BACKEND}/generate-report/${conversationId}`, {
+      method: "POST",
+    });
 
-    // ✅ If backend returned error JSON/text, show it
     if (!res.ok) {
       const errText = await res.text();
       alert(`Report failed (${res.status}): ${errText}`);
       return;
     }
 
-    // ✅ Extra safety: confirm it is PDF
     const ct = res.headers.get("content-type") || "";
     if (!ct.includes("application/pdf")) {
       const bad = await res.text();
@@ -475,22 +565,20 @@ function extractFinanceData(text: string) {
       {/* Header */}
       <div className="h-16 flex items-center justify-between px-6 border-b border-white/10 bg-black/60 backdrop-blur">
         <div className="flex items-center gap-3">
-         <div className="flex items-center gap-3">
-  <div className="h-10 w-10 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center overflow-hidden">
-    <img
-      src="/logo.png"
-      alt="SmartTax AI Logo"
-      className="h-7 w-7 object-contain"
-    />
-  </div>
+          <div className="h-10 w-10 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center overflow-hidden">
+            <img
+              src="/logo.png"
+              alt="SmartTax AI Logo"
+              className="h-7 w-7 object-contain"
+            />
+          </div>
 
-  <div className="leading-tight">
-    <div className="text-sm font-semibold">SmartTax AI ✨</div>
-    <div className="text-xs text-white/60">
-      AI-Powered Tax Intelligence
-    </div>
-  </div>
-</div>
+          <div className="leading-tight">
+            <div className="text-sm font-semibold">SmartTax AI ✨</div>
+            <div className="text-xs text-white/60">
+              AI-Powered Tax Intelligence
+            </div>
+          </div>
         </div>
 
         <div className="flex items-center gap-3">
@@ -504,80 +592,50 @@ function extractFinanceData(text: string) {
           </button>
 
           <a
-  href="https://smarttaxai-waitlist.com/waitlist"
-  target="_blank"
-  rel="noopener noreferrer"
-  className="h-10 px-4 rounded-full bg-violet-600 hover:bg-violet-500 transition font-semibold flex items-center justify-center"
->
-  Early Access
-</a>
+            href="https://smarttaxai-waitlist.com/waitlist"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="h-10 px-4 rounded-full bg-violet-600 hover:bg-violet-500 transition font-semibold flex items-center justify-center"
+          >
+            Early Access
+          </a>
         </div>
       </div>
 
       {/* Background */}
       <div className="relative h-[calc(100vh-64px)] overflow-hidden">
-  <div className="absolute inset-0 pointer-events-none z-0">
-    
-    {/* Grid lines */}
-    <div className="absolute inset-0 opacity-[0.08] bg-[linear-gradient(to_right,#ffffff_1px,transparent_1px),linear-gradient(to_bottom,#ffffff_1px,transparent_1px)] bg-size-[80px_80px]" />
-
-    {/* Large right circles */}
-    <div className="absolute -right-64 -bottom-64 h-225 w-225 rounded-full border border-white/10" />
-    <div className="absolute -right-80 -bottom-80 h-262.5 w-262.5 rounded-full border border-white/5" />
-
-    {/* Dots */}
-    <div className="absolute inset-0 opacity-30 bg-[radial-gradient(#ffffff_1px,transparent_1px)] bg-size-[70px_70px]" />
-
-  </div>
-
+        <div className="absolute inset-0 pointer-events-none z-0">
+          <div className="absolute inset-0 opacity-[0.08] bg-[linear-gradient(to_right,#ffffff_1px,transparent_1px),linear-gradient(to_bottom,#ffffff_1px,transparent_1px)] bg-size-[80px_80px]" />
+          <div className="absolute inset-0 opacity-30 bg-[radial-gradient(#ffffff_1px,transparent_1px)] bg-size-[70px_70px]" />
+        </div>
 
         {/* Main layout */}
         <div className="relative z-10 h-full flex flex-col">
           <div className="flex-1 overflow-y-auto">
-            <div className="max-w-5xl mx-auto px-6 pt-16 pb-10">
+            <div className="max-w-6xl mx-auto px-6 pt-16 pb-10">
               <div className="flex flex-col items-center text-center">
-                <div className="h-20 w-20 rounded-3xl bg-violet-600/25 border border-violet-400/25 flex items-center justify-center shadow-[0_20px_60px_rgba(124,58,237,0.18)]">
-                  <div className="mx-auto h-20 w-20 rounded-3xl bg-black border border-violet-500/40 flex items-center justify-center shadow-[0_0_30px_rgba(124,58,237,0.35)]">
-  <div className="h-16 w-16 rounded-2xl bg-linear-to-br from-violet-600 to-violet-800 flex items-center justify-center">
-    <img
-      src="/logo.png"
-      alt="SmartTax AI Logo"
-      className="h-10 w-10 object-contain"
-    />
-  </div>
-</div>      </div>
-
-                <h1 className="text-4xl md:text-5xl font-bold text-center">
-  {cleanName && (
-    <>
-      {cleanName.charAt(0).toUpperCase() +
-        cleanName.slice(1).toLowerCase()}
-      {", "}
-    </>
-  )}
-  Welcome to{" "}
-  <span className="text-purple-400">SmartTax AI</span>
-</h1>
-
-                <p className="mt-4 text-white/70 max-w-2xl">
-                  Feeling unsure about your taxes? You&apos;re not alone. Let&apos;s sort it out
-                  together.
-                </p>
-
-                <div className="mt-6 flex items-center gap-3 flex-wrap justify-center">
-                  <span className="text-sm text-white/60">Built for:</span>
-                  {quickPills.map((p) => (
-                    <span
-                      key={p}
-                      className="px-4 py-2 rounded-full bg-white/5 border border-white/10 text-sm text-white/80"
-                    >
-                      {p}
-                    </span>
-                  ))}
+                <div className="h-16 w-16 rounded-2xl bg-violet-600/15 border border-violet-400/20 flex items-center justify-center shadow-[0_20px_60px_rgba(124,58,237,0.12)]">
+                  <img
+                    src="/logo.png"
+                    alt="SmartTax AI Logo"
+                    className="h-9 w-9 object-contain"
+                  />
                 </div>
 
+                {activeTab === "expenses" && (
+                  <h1 className="mt-6 text-3xl md:text-4xl font-bold text-center text-purple-400">
+                    Expenses
+                  </h1>
+                )}
+
+                {activeTab === "summary" && (
+                  <h1 className="mt-6 text-3xl md:text-4xl font-bold text-center text-purple-400">
+                    Summary
+                  </h1>
+                )}
+
                 {/* Tabs */}
-                <div className="mt-10 flex items-center justify-center gap-2 text-xs">
+                <div className="mt-6 flex items-center justify-center gap-2 text-xs">
                   {[
                     { key: "chat", label: "Chat" },
                     { key: "expenses", label: "Expenses" },
@@ -590,7 +648,7 @@ function extractFinanceData(text: string) {
                         "px-4 py-2 rounded-full border transition",
                         activeTab === t.key
                           ? "bg-violet-600 border-violet-400 text-white"
-                          : "bg-white/5 border-white/10 text-white/60 hover:bg-white/10"
+                          : "bg-white/5 border-white/10 text-white/60 hover:bg-white/10",
                       )}
                     >
                       {t.label}
@@ -600,17 +658,16 @@ function extractFinanceData(text: string) {
 
                 {/* CHAT */}
                 {activeTab === "chat" && (
-                  <div className="mt-12 w-full max-w-3xl">
+                  <div className="mt-10 w-full max-w-3xl">
                     <div className="relative z-10 pointer-events-auto rounded-3xl border border-white/10 bg-black/30 backdrop-blur-xl overflow-hidden">
                       <div
-  ref={messagesContainerRef}
-  className="max-h-80 overflow-y-auto px-5 py-5 space-y-3"
->
+                        ref={messagesContainerRef}
+                        className="max-h-80 overflow-y-auto px-5 py-5 space-y-3"
+                      >
                         {messages.map((m) => {
                           const st = m.backendMessageId
                             ? feedbackByMsg[m.backendMessageId]
                             : undefined;
-
                           const alreadyVoted = !!st?.rating;
                           const submitting = !!st?.submitting;
                           const disabled = alreadyVoted || submitting;
@@ -620,25 +677,28 @@ function extractFinanceData(text: string) {
                               key={m.id}
                               className={cx(
                                 "w-full flex",
-                                m.role === "user" ? "justify-end" : "justify-start"
+                                m.role === "user"
+                                  ? "justify-end"
+                                  : "justify-start",
                               )}
                             >
                               <div
-  className={cx(
-    "max-w-[85%] rounded-2xl px-4 py-3 text-sm",
-    m.role === "user"
-      ? "bg-violet-600 text-white"
-      : "bg-white/5 border border-white/10 text-white/85"
-  )}
->
-  {/* ✅ Message text (keeps newlines + indentation) */}
-  <div className="whitespace-pre-wrap leading-relaxed">
-    {m.text}
-  </div>
+                                className={cx(
+                                  "max-w-[85%] rounded-2xl px-4 py-3 text-sm",
+                                  m.role === "user"
+                                    ? "bg-violet-600 text-white"
+                                    : "bg-white/5 border border-white/10 text-white/85",
+                                )}
+                              >
+                                <div className="whitespace-pre-wrap leading-relaxed">
+                                  {m.text}
+                                </div>
 
-  {/* ✅ Feedback only for bot messages */}
-  {m.role === "bot" && m.backendMessageId && m.conversationId && (
-    <div className="mt-2">
+                                {/* feedback only works if backend gives ids */}
+                                {m.role === "bot" &&
+                                  m.backendMessageId &&
+                                  m.conversationId && (
+                                    <div className="mt-2">
                                       <div className="flex gap-2 text-xs items-center">
                                         <button
                                           type="button"
@@ -648,9 +708,11 @@ function extractFinanceData(text: string) {
                                             disabled &&
                                               "opacity-40 cursor-not-allowed hover:bg-white/10",
                                             st?.rating === "up" &&
-                                              "ring-2 ring-violet-400/60"
+                                              "ring-2 ring-violet-400/60",
                                           )}
-                                          onClick={() => handleFeedback(m, "up")}
+                                          onClick={() =>
+                                            handleFeedback(m, "up")
+                                          }
                                         >
                                           👍
                                         </button>
@@ -663,11 +725,13 @@ function extractFinanceData(text: string) {
                                             disabled &&
                                               "opacity-40 cursor-not-allowed hover:bg-white/10",
                                             st?.rating === "down" &&
-                                              "ring-2 ring-violet-400/60"
+                                              "ring-2 ring-violet-400/60",
                                           )}
                                           onClick={() => {
                                             if (disabled) return;
-                                            setCommentBoxFor(m.backendMessageId!);
+                                            setCommentBoxFor(
+                                              m.backendMessageId!,
+                                            );
                                             setCommentText("");
                                           }}
                                         >
@@ -675,7 +739,9 @@ function extractFinanceData(text: string) {
                                         </button>
 
                                         {submitting && (
-                                          <span className="text-white/50">Saving…</span>
+                                          <span className="text-white/50">
+                                            Saving…
+                                          </span>
                                         )}
                                       </div>
 
@@ -684,7 +750,9 @@ function extractFinanceData(text: string) {
                                           <div className="mt-3 space-y-2 text-left">
                                             <textarea
                                               value={commentText}
-                                              onChange={(e) => setCommentText(e.target.value)}
+                                              onChange={(e) =>
+                                                setCommentText(e.target.value)
+                                              }
                                               placeholder="Optional: tell us what was wrong..."
                                               className="w-full rounded-lg bg-black/40 border border-white/10 p-2 text-xs outline-none focus:ring-2 focus:ring-violet-500/30"
                                               rows={3}
@@ -696,7 +764,11 @@ function extractFinanceData(text: string) {
                                                 type="button"
                                                 className="px-3 py-1 text-xs rounded bg-violet-600 hover:bg-violet-500"
                                                 onClick={() =>
-                                                  handleFeedback(m, "down", commentText)
+                                                  handleFeedback(
+                                                    m,
+                                                    "down",
+                                                    commentText,
+                                                  )
                                                 }
                                               >
                                                 Submit
@@ -721,14 +793,11 @@ function extractFinanceData(text: string) {
                             </div>
                           );
                         })}
-                        
                       </div>
 
                       {/* Input */}
                       <div className="border-t border-white/10 px-4 py-3">
                         <div className="flex items-center gap-3">
-                          
-
                           <input
                             value={input}
                             onChange={(e) => setInput(e.target.value)}
@@ -759,18 +828,17 @@ function extractFinanceData(text: string) {
 
                 {/* EXPENSES */}
                 {activeTab === "expenses" && (
-                  <div className="mt-12 w-full max-w-3xl p-5 rounded-3xl bg-white/5 border border-white/10">
-                    <div className="text-sm font-semibold mb-3">Upload Expense CSV</div>
+                  <div className="mt-10 w-full max-w-3xl p-5 rounded-3xl bg-white/5 border border-white/10">
+                    <div className="text-sm font-semibold mb-3">
+                      Upload Expense CSV
+                    </div>
 
                     <label className="mt-3 inline-flex items-center gap-2 cursor-pointer px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 transition text-xs">
                       📄 Choose CSV File
                       <input
                         type="file"
                         accept=".csv"
-                        onChange={(e) => {
-                          const f = e.target.files?.[0] || null;
-                          setFile(f);
-                        }}
+                        onChange={(e) => setFile(e.target.files?.[0] || null)}
                         className="hidden"
                       />
                     </label>
@@ -788,15 +856,16 @@ function extractFinanceData(text: string) {
 
                     {uploadResult && (
                       <div className="mt-4 text-xs space-y-1">
-                        <div>Total Uploaded: ${uploadResult.total_uploaded}</div>
-
-                        {Object.entries(uploadResult.category_breakdown).map(
-                          ([cat, amt]: any) => (
-                            <div key={cat}>
-                              {cat}: ${amt}
-                            </div>
-                          )
-                        )}
+                        <div>
+                          Total Uploaded: ${uploadResult.total_uploaded}
+                        </div>
+                        {Object.entries(
+                          uploadResult.category_breakdown ?? {},
+                        ).map(([cat, amt]: any) => (
+                          <div key={cat}>
+                            {cat}: ${amt}
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>
@@ -804,46 +873,68 @@ function extractFinanceData(text: string) {
 
                 {/* SUMMARY */}
                 {activeTab === "summary" && (
-                  <div className="mt-12 w-full max-w-3xl p-5 rounded-3xl bg-white/5 border border-white/10 space-y-3">
-                    <div className="text-xs text-white/60">Annual Income</div>
+                  <div className="mt-12 w-full max-w-6xl mx-auto grid gap-6 lg:grid-cols-2 items-start">
+                    <div className="p-5 rounded-3xl bg-white/5 border border-white/10 space-y-3">
+                      <div className="text-xs text-white/60">Annual Income</div>
 
-                    <input
-                      value={income}
-                      onChange={(e) => setIncome(e.target.value)}
-                      placeholder="Enter income (example: 60000)"
-                      className="w-full h-11 px-4 rounded-xl bg-black/40 border border-white/10 text-sm outline-none focus:ring-2 focus:ring-violet-500/30"
-                    />
+                      <input
+                        value={income}
+                        onChange={(e) => setIncome(e.target.value)}
+                        placeholder="Enter income (example: 60000)"
+                        className="w-full h-11 px-4 rounded-xl bg-black/40 border border-white/10 text-sm outline-none focus:ring-2 focus:ring-violet-500/30"
+                      />
 
-                    <div className="text-xs text-white/50">
-                      Uploaded expenses total: ${totalExpenses}
+                      <div className="text-xs text-white/50">
+                        Uploaded expenses total: ${totalExpenses}
+                      </div>
+
+                      <button
+                        onClick={calculateTaxes}
+                        className="px-4 py-2 bg-violet-600 rounded-xl text-sm hover:bg-violet-500 transition"
+                      >
+                        Calculate Estimate
+                      </button>
+
+                      {calcResult && (
+                        <div className="text-xs space-y-1 pt-2">
+                          <div>Total Income: ${calcResult.total_income}</div>
+                          <div>
+                            Total Expenses: ${calcResult.total_expenses}
+                          </div>
+                          <div>
+                            Net Business Income: $
+                            {calcResult.net_business_income}
+                          </div>
+                          <div>
+                            Self Employment Tax: $
+                            {calcResult.self_employment_tax}
+                          </div>
+                          <div>Income Tax: ${calcResult.income_tax}</div>
+                          <div className="pt-1 font-semibold">
+                            Total Estimated Tax: ${calcResult.total_tax}
+                          </div>
+
+                          <div className="pt-4">
+                            <ExpensePieChart
+                              data={calcResult.deductions_by_category || []}
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      <button
+                        onClick={downloadReport}
+                        className="mt-2 px-4 py-2 bg-white/10 rounded-xl text-sm hover:bg-white/20 transition"
+                      >
+                        Download PDF Report
+                      </button>
                     </div>
 
-                    <button
-                      onClick={calculateTaxes}
-                      className="px-4 py-2 bg-violet-600 rounded-xl text-sm hover:bg-violet-500 transition"
-                    >
-                      Calculate Estimate
-                    </button>
-
-                    {calcResult && (
-                      <div className="text-xs space-y-1 pt-2">
-                        <div>Total Income: ${calcResult.total_income}</div>
-                        <div>Total Expenses: ${calcResult.total_expenses}</div>
-                        <div>Net Business Income: ${calcResult.net_business_income}</div>
-                        <div>Self Employment Tax: ${calcResult.self_employment_tax}</div>
-                        <div>Income Tax: ${calcResult.income_tax_estimate}</div>
-                        <div className="pt-1 font-semibold">
-                          Total Estimated Tax: ${calcResult.total_estimated_tax}
-                        </div>
-                      </div>
-                    )}
-
-                    <button
-                      onClick={downloadReport}
-                      className="px-4 py-2 bg-white/10 rounded-xl text-sm hover:bg-white/20 transition"
-                    >
-                      Download PDF Report
-                    </button>
+                    <div className="rounded-3xl bg-white/5 border border-white/10 overflow-hidden">
+                      {calcResult ? (
+                        <TaxSummaryDashboard data={calcResult} />
+                      ) : null}
+                    </div>
                   </div>
                 )}
               </div>
@@ -853,4 +944,4 @@ function extractFinanceData(text: string) {
       </div>
     </div>
   );
-} 
+}

@@ -1,17 +1,12 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+.env
+
 # Node
 node_modules/
 .next/
 
-# Python
-backend/venv/
-__pycache__/
-*.pyc
-
-# Environment files
-.env
-.env.local
-
-# OS
+# Mac
 .DS_Store
-Thumbs.db
-*.pdf

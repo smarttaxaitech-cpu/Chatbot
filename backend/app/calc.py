@@ -1,6 +1,7 @@
 from typing import List, Optional, Literal, Dict
 from pydantic import BaseModel
 from datetime import date
+from typing import Optional
 
 IncomeType = Literal["1099", "w2", "gig", "interest", "dividends", "other"]
 
@@ -27,10 +28,17 @@ class CalcAssumptions(BaseModel):
 
 
 class CalcEstimateRequest(BaseModel):
-    conversation_id: Optional[str] = None
-    income_sources: List[IncomeSource] = []
-    expenses: List[ExpenseItem] = []
-    assumptions: CalcAssumptions = CalcAssumptions()
+    conversation_id: str
+
+    # make BOTH optional
+    income_sources: Optional[List[IncomeSource]] = None
+    income: Optional[float] = None
+
+    expenses: Optional[List[ExpenseItem]] = []
+    home_office_sqft: Optional[int] = None
+    vehicle_business_use_percent: Optional[float] = None
+
+    assumptions: Optional[CalcAssumptions] = None
 
 
 class DeductionByCategory(BaseModel):

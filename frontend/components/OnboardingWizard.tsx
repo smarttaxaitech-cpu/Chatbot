@@ -104,7 +104,7 @@ export default function OnboardingWizard() {
   }
 
   if (mode === "chat") {
-    // Pass firstName; SmartTaxChat should handle empty gracefully
+    // Pass firstName and onReset as direct props
     return <SmartTaxChat firstName={answers.firstName} onReset={resetAll} />;
   }
 

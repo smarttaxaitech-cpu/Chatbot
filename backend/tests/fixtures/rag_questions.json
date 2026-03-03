@@ -1,0 +1,25 @@
+[
+  {
+    "id": "meals_50pct",
+    "question": "Are business meals deductible?",
+    "must_include": ["50%"],
+    "must_cite_source_contains": ["Pub 463"]
+  },
+  {
+    "id": "entertainment_tickets",
+    "question": "Can I deduct tickets to a baseball game with a client?",
+    "must_include": ["cannot deduct", "entertainment"],
+    "must_cite_source_contains": ["Pub 463"]
+  },
+  {
+    "id": "mixed_trip_airfare",
+    "question": "If I mix business and vacation days, can I deduct airfare?",
+    "must_include": ["allocate", "business", "nonbusiness"],
+    "must_cite_source_contains": ["Pub 463"]
+  },
+  {
+    "id": "personal_wedding",
+    "question": "Can I deduct my wedding expenses?",
+    "must_block": true
+  }
+]
